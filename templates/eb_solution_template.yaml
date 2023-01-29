@@ -1,0 +1,504 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Template to launch the solution'
+
+Metadata:
+  'AWS::CloudFormation::Interface':
+    ParameterGroups:
+    - Label:
+        default: 'Solution Parameters'
+      Parameters:
+      - PartnerEventBusName
+      - PartnerRuleName
+      - ChannelArn
+    - Label:
+        default: 'Source code location'
+      Parameters:
+      - S3BucketLocation
+      - S3KeyPrefix
+
+Parameters:
+  PartnerEventBusName:
+    Type: String
+    Description: Partner specific EventBus Name. Created during EventBus Configuration.
+  PartnerRuleName:
+    Type: String
+    Description: Event rule name.
+    Default: "partner_event_process_rule"
+  ChannelArn:
+    Type: String
+    Description: Channel Arn.
+  S3BucketLocation:
+    Description: Amazon S3 Bucket where the lambda function are present
+    Type: String
+    Default: vinjak-archive
+  S3KeyPrefix:
+    Description: S3 Key to store/retrieve lambda functions from.
+    Type: String
+    Default: nonaws-events
+
+Resources:
+
+  NonAWSEventKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: "This is KMS Key Id used to encrypt/decrypt the Secret"
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-default-1
+        Statement:
+        - Sid: Allow administration of the key
+          Effect: Allow
+          Principal:
+            AWS: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:root
+          Action:
+            - kms:Create*
+            - kms:Describe*
+            - kms:Enable*
+            - kms:List*
+            - kms:Put*
+            - kms:Update*
+            - kms:Revoke*
+            - kms:Disable*
+            - kms:Get*
+            - kms:Delete*
+            - kms:ScheduleKeyDeletion
+            - kms:CancelKeyDeletion
+          Resource: 
+            - !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+        - Sid: Allow access to lambda role
+          Effect: Allow
+          Principal:
+            Service: "lambda.amazonaws.com"
+          Action:
+            - kms:Decrypt
+            - kms:GenerateDataKey
+          Resource: 
+            - !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+          Condition:
+            ArnEquals:
+              aws:SourceArn:
+                - !Sub arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}-eb-ti-function
+        - Sid: Allow use of the key for lambda role
+          Effect: Allow
+          Principal:
+            AWS: 
+            - !GetAtt EBTransformIngestLambdaRole.Arn
+          Action:
+            - kms:Decrypt
+            - kms:GenerateDataKey
+          Resource:
+            - !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+        - Sid: Allow access to sqs role
+          Effect: Allow
+          Principal:
+            Service: "sqs.amazonaws.com"
+          Action:
+            - kms:Decrypt
+            - kms:GenerateDataKey
+          Resource: 
+            - !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+          Condition:
+            ArnEquals:
+              aws:SourceArn:
+                - !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AWS::StackName}-PartnerEvent
+                - !Sub arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:${AWS::StackName}-PartnerEventDLQ
+        - Sid: Allow access to sqs role
+          Effect: Allow
+          Principal:
+            Service: "events.amazonaws.com"
+          Action:
+            - kms:Decrypt
+            - kms:GenerateDataKey
+          Resource: 
+            - !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+          Condition:
+            ArnEquals:
+              aws:SourceArn:
+                - !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${PartnerEventBusName}/${PartnerRuleName}
+
+  LambdaZipsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+
+  NonAWSEventKMSAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/non-aws-event${AWS::StackName}"
+      TargetKeyId: !Ref NonAWSEventKMSKey
+
+  EBTransformIngestLambda:
+    DependsOn: CopyZips
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W58
+            reason: "Permission for writing cloudwatch logs is defined in the lambda role"
+    Properties:
+      Code:
+        S3Bucket: !Ref LambdaZipsBucket
+        S3Key: !Sub ${S3KeyPrefix}/eb_transform_ingest.zip
+      FunctionName: !Sub "${AWS::StackName}-eb-ti-function"
+      Description: Lambda to transform partner event and ingest the event in to CloudTrail
+      Handler: eb_transform_ingest.lambda_handler
+      MemorySize: 128
+      ReservedConcurrentExecutions: 10
+      Role: !GetAtt 'EBTransformIngestLambdaRole.Arn'
+      Runtime: python3.9
+      Timeout: 300
+      TracingConfig:
+          Mode: Active
+      Environment:
+        Variables:
+          EVENT_BUS_NAME: !Ref PartnerEventBusName
+          RULE_NAME: !Ref PartnerRuleName
+          CHANNEL_ARN: !Ref ChannelArn
+      Layers:
+        - !Ref BetaBotoLayer
+
+  EBTransformIngestLambdaRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "Allow Resource * for KMS API. KMS Service only support all resources. Key ID is generated by the service."
+          - id: W11
+            reason: "Allow Resource * for xray. The allowed APIs only support all resources."
+          - id: W28
+            reason: "The role name is defined to identify all solution resources."
+    Properties:
+      RoleName: !Sub "${AWS::StackName}-eb-ti-lambda-exec-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: NonAWSEventLambda-Logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+        - PolicyName: NonAWSEvent-Lambda-KMS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: "Allow"
+                Action:
+                  - kms:Decrypt
+                  - kms:GenerateDataKey
+                Resource: 
+                  - !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*
+        - PolicyName: NonAWSEvent-Lambda-SQS
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - sqs:DeleteMessage
+                  - sqs:ReceiveMessage
+                  - sqs:SendMessage
+                  - sqs:GetQueueAttributes
+                Resource:
+                  - !GetAtt PartnerEventDLQFIFOQueue.Arn 
+                  - !GetAtt PartnerEventQueueFIFO.Arn
+        - PolicyName: NonAWSEvent-Lambda-CloudTrailLake
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cloudtrail-data:PutAuditEvents
+                Resource: !Ref ChannelArn
+
+  BetaBotoLayer:
+    DependsOn: CopyZips
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      CompatibleRuntimes:
+        - python3.8
+        - python3.9
+      Content:
+        S3Bucket: !Ref LambdaZipsBucket
+        S3Key: !Sub "${S3KeyPrefix}/l_boto3.zip"
+      Description: Layer for beta version of boto3
+      LayerName: !Sub "latest-boto-${AWS::StackName}"
+
+  PartnerEventDLQFIFOQueue:
+    Type: AWS::SQS::Queue
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "The queue name is defined in order not to exceed the limit on the length of SQS queue name."
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-PartnerEventDLQ"
+      MessageRetentionPeriod: 1209600 #1209600 seconds (14 days)
+      KmsDataKeyReusePeriodSeconds: 300
+      KmsMasterKeyId: !Sub "alias/non-aws-event${AWS::StackName}"
+      ReceiveMessageWaitTimeSeconds: 10
+
+  PartnerEventQueueFIFO:
+    Type: AWS::SQS::Queue
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W28
+            reason: "The queue name is defined in order not to exceed the limit on the length of SQS queue name."
+    Properties:
+      QueueName: !Sub "${AWS::StackName}-PartnerEvent"
+      KmsDataKeyReusePeriodSeconds: 300
+      KmsMasterKeyId: !Sub "alias/non-aws-event${AWS::StackName}"
+      MessageRetentionPeriod: 345600  #345600 seconds (4 days)
+      ReceiveMessageWaitTimeSeconds: 20
+      VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt PartnerEventDLQFIFOQueue.Arn
+        maxReceiveCount: 5
+
+  PartnerEventQueueFIFOLambdaEventMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      Enabled: true
+      EventSourceArn: !GetAtt PartnerEventQueueFIFO.Arn
+      FunctionName: !Ref EBTransformIngestLambda
+
+  PartnerEventQueueFIFOPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref PartnerEventQueueFIFO
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt PartnerEventQueueFIFO.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${PartnerEventBusName}/${PartnerRuleName}
+
+  CreatePartnerNonAWSEventRuleLambdaRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "The logs APIs need the permissions to /aws/lambda/*"
+          - id: W11
+            reason: "Allow Resource * for xray. The allowed APIs only support all resources."
+          - id: W28
+            reason: "The role name is defined to identify all solution resources."
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: NonAWSEventLambda-Logs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+              - Effect: Allow
+                Action:
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*:*
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                Resource: '*'
+        - PolicyName: NonAWSEventLambda-events
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - events:DeleteRule
+                  - events:PutTargets
+                  - events:PutRule
+                  - events:RemoveTargets
+                  - events:ListTargetsByRule
+                Resource:
+                  - !Sub arn:${AWS::Partition}:events:${AWS::Region}:${AWS::AccountId}:rule/${PartnerEventBusName}/${PartnerRuleName}
+
+  CreateNonAWSEventRuleLambda:
+    DependsOn: CopyZips
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${AWS::StackName}-create-event-rule"
+      Code:
+        S3Bucket: !Ref LambdaZipsBucket
+        S3Key: !Sub ${S3KeyPrefix}/create_event_rule.zip
+      Handler: create_event_rule.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt "CreatePartnerNonAWSEventRuleLambdaRole.Arn"
+      Runtime: python3.9
+      Timeout: 300
+      ReservedConcurrentExecutions: 10
+      Environment:
+        Variables:
+          EVENT_BUS_NAME: !Ref PartnerEventBusName
+          RULE_NAME: !Ref PartnerRuleName
+          TARGET_ARN: !GetAtt PartnerEventQueueFIFO.Arn
+
+  TriggerNonAWSEventLambda:
+    Type: 'Custom::CreateRule'
+    Properties:
+      ServiceToken: !GetAtt "CreateNonAWSEventRuleLambda.Arn"
+
+  PermissionToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !GetAtt CreateNonAWSEventRuleLambda.Arn
+      Principal: cloudformation.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  CopyZips:
+    Type: Custom::CopyZips
+    Properties:
+      ServiceToken: !GetAtt CopyZipsFunction.Arn
+      DestBucket: !Ref LambdaZipsBucket
+      SourceBucket: !Ref S3BucketLocation
+      Prefix: !Sub ${S3KeyPrefix}/
+      Objects:
+        - 'create_event_rule.zip'
+        - 'l_boto3.zip'
+        - 'eb_transform_ingest.zip'
+
+  CopyZipsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Sub 'arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Path: /
+      Policies:
+        - PolicyName: lambda-copier
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectTagging
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${S3BucketLocation}/${S3KeyPrefix}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${S3BucketLocation}/${S3KeyPrefix}/*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:PutObjectTagging
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:s3:::${LambdaZipsBucket}/${S3KeyPrefix}'
+                  - !Sub 'arn:${AWS::Partition}:s3:::${LambdaZipsBucket}/${S3KeyPrefix}/*'
+
+  CopyZipsFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Copies objects from the S3 bucket to a new location.
+      Handler: index.handler
+      Runtime: python3.7
+      Role: !GetAtt 'CopyZipsRole.Arn'
+      ReservedConcurrentExecutions: 1
+      Timeout: 240
+      Code:
+        ZipFile: |
+          import json
+          import logging
+          import threading
+          import boto3
+          import cfnresponse
+          def copy_objects(source_bucket, dest_bucket, prefix, objects):
+              s3 = boto3.client('s3')
+              for o in objects:
+                  key = prefix + o
+                  copy_source = {
+                      'Bucket': source_bucket,
+                      'Key': key
+                  }
+                  print('copy_source: %s' % copy_source)
+                  print('dest_bucket = %s'%dest_bucket)
+                  print('key = %s' %key)
+                  s3.copy_object(CopySource=copy_source, Bucket=dest_bucket,
+                        Key=key)
+          def delete_objects(bucket, prefix, objects):
+              s3 = boto3.client('s3')
+              objects = {'Objects': [{'Key': prefix + o} for o in objects]}
+              s3.delete_objects(Bucket=bucket, Delete=objects)
+          def timeout(event, context):
+              logging.error('Execution is about to time out, sending failure response to CloudFormation')
+              cfnresponse.send(event, context, cfnresponse.FAILED, {}, None)
+          def handler(event, context):
+              # make sure we send a failure to CloudFormation if the function
+              # is going to timeout
+              timer = threading.Timer((context.get_remaining_time_in_millis()
+                        / 1000.00) - 0.5, timeout, args=[event, context])
+              timer.start()
+              print('Received event: %s' % json.dumps(event))
+              status = cfnresponse.SUCCESS
+              try:
+                  source_bucket = event['ResourceProperties']['SourceBucket']
+                  dest_bucket = event['ResourceProperties']['DestBucket']
+                  prefix = event['ResourceProperties']['Prefix']
+                  objects = event['ResourceProperties']['Objects']
+                  if event['RequestType'] == 'Delete':
+                      delete_objects(dest_bucket, prefix, objects)
+                  else:
+                      copy_objects(source_bucket, dest_bucket, prefix, objects)
+              except Exception as e:
+                  logging.error('Exception: %s' % e, exc_info=True)
+                  status = cfnresponse.FAILED
+              finally:
+                  timer.cancel()
+                  cfnresponse.send(event, context, status, {}, None)
