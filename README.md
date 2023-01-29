@@ -93,8 +93,7 @@ and eventTime < '2023-01-31 22:23:12.000'
 4. Choose the Event data store that you created as part of the pre-requisites. It will automatically update the event data store value in the query.
 5. Adjust the eventTime to time duration after this solution deployment. The output looks like below.
 
-![](images/Query-21.png){width="5.853210848643919in"
-height="3.064219160104987in"}*Query non-AWS events from CloudTrail Lake*
+![](images/Query-21.png)*Query non-AWS events from CloudTrail Lake*
 
 Step-3b: Query both AWS and non-AWS events in CloudTrail Lake
 
@@ -118,8 +117,7 @@ and eventTime > '2022-09-08 22:22:30.000' and eventTime < '2022-09-08 22:23:12.0
 
 2.	Adjust the event data store and eventTime as per your environment. The output looks like below.
 
-![](images/Query-22.png){width="5.853210848643919in"
-height="3.064219160104987in"}*Query both AWS and non-AWS events together from CloudTrail Lake*
+![](images/Query-22.png)*Query both AWS and non-AWS events together from CloudTrail Lake*
 
 ## Clean up
 If you’re experimenting and want to clean the resources created after the testing or decide not to go with this approach, then you can [delete the CloudFormation stack](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-console-delete-stack.html) that you created as part of Step-1. This clears all of the resources created by this solution.
