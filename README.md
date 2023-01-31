@@ -22,7 +22,7 @@ Before configuring this solution, conduct the following tasks:
 
 * Create an [Event Data Store in CloudTrail Lake](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/query-event-data-store.html) to store events from non-AWS sources.
 
-* [Create a CloudTrail channel](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/query-event-data-store-integration.html) in your AWS Account. 
+* [Create an integration with Okta](https://docs.aws.amazon.com/awscloudtrail/latest/userguide/query-event-data-store-integration.html) as a source in your AWS Account and note down the Channel ARN. You will use this to launch the solution below.
 
 When you deploy this solution, you’re responsible for the charges associated with additional services used in addition to the [EventBridge cost](https://aws.amazon.com/eventbridge/pricing/). Additional services include [SQS queue](https://aws.amazon.com/sqs/pricing/), AWS [Lambda](https://aws.amazon.com/lambda/pricing/), and [CloudTrail Lake](https://aws.amazon.com/cloudtrail/pricing/) ingestion and query cost. 
 
